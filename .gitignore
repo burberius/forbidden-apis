@@ -1,2 +1,5 @@
 /dist
 /build
+.ivy
+forbidden-apis-report.xml
+*~

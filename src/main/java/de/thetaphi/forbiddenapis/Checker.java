@@ -49,7 +49,7 @@ import org.objectweb.asm.Type;
  * Forbidden APIs checker class.
  */
 public final class Checker implements RelatedClassLookup, Constants {
-  
+
   public static enum Option {
     FAIL_ON_MISSING_CLASSES,
     FAIL_ON_VIOLATION,
@@ -58,41 +58,43 @@ public final class Checker implements RelatedClassLookup, Constants {
   }
 
   public final boolean isSupportedJDK;
-  
+
   private final long start;
   private final NavigableSet<String> runtimePaths;
-    
+
   final Logger logger;
-  
+  private final ReportWriter reportWriter;
+
   final ClassLoader loader;
   final java.lang.reflect.Method method_Class_getModule, method_Module_getName;
   final EnumSet<Option> options;
-  
+
   /** Classes to check: key is the binary name (dotted) */
   final Map<String,ClassSignature> classesToCheck = new HashMap<String,ClassSignature>();
   /** Cache of loaded classes: key is the binary name (dotted) */
   final Map<String,ClassSignature> classpathClassCache = new HashMap<String,ClassSignature>();
-  
+
   final Signatures forbiddenSignatures;
-  
+
   /** descriptors (not internal names) of all annotations that suppress */
   final Set<String> suppressAnnotations = new LinkedHashSet<String>();
-    
+
   public Checker(Logger logger, ClassLoader loader, Option... options) {
     this(logger, loader, (options.length == 0) ? EnumSet.noneOf(Option.class) : EnumSet.copyOf(Arrays.asList(options)));
   }
-  
+
   public Checker(Logger logger, ClassLoader loader, EnumSet<Option> options) {
     this.logger = logger;
     this.loader = loader;
     this.options = options;
     this.start = System.currentTimeMillis();
-    
+    reportWriter = new ReportWriter(logger);
+
     // default (always available)
     addSuppressAnnotation(SuppressForbidden.class);
-    
+
     boolean isSupportedJDK = false;
-    
+
     // Try to figure out entry points to Java 9+ module system (Jigsaw)
     java.lang.reflect.Method method_Class_getModule, method_Module_getName;
     try {
@@ -105,9 +107,9 @@ public final class Checker implements RelatedClassLookup, Constants {
     }
     this.method_Class_getModule = method_Class_getModule;
     this.method_Module_getName = method_Module_getName;
-    
+
     final NavigableSet<String> runtimePaths = new TreeSet<String>();
-    
+
     // fall back to legacy behavior:
     if (!isSupportedJDK) {
       try {
@@ -157,7 +159,7 @@ public final class Checker implements RelatedClassLookup, Constants {
     }
     this.runtimePaths = runtimePaths;
     // logger.info("Runtime paths: " + runtimePaths);
-    
+
     if (isSupportedJDK) {
       try {
         isSupportedJDK = getClassFromClassLoader(Object.class.getName()).isRuntimeClass;
@@ -175,20 +177,20 @@ public final class Checker implements RelatedClassLookup, Constants {
         isSupportedJDK = false;
       }
     }
-    
+
     // finally set the latest value to final field:
     this.isSupportedJDK = isSupportedJDK;
-    
+
     // make signatures ready for parse:
     this.forbiddenSignatures = new Signatures(this);
   }
-  
+
   /** Loads the class from Java9's module system and uses reflection to get methods and fields. */
   private ClassSignature loadClassFromJigsaw(String classname) throws IOException {
     if (method_Class_getModule == null || method_Module_getName == null) {
       return null; // not Jigsaw Module System
     }
-    
+
     final Class<?> clazz;
     final String moduleName;
     try {
@@ -198,10 +200,10 @@ public final class Checker implements RelatedClassLookup, Constants {
     } catch (Exception e) {
       return null; // not found
     }
-    
+
     return new ClassSignature(clazz, AsmUtils.isRuntimeModule(moduleName));
   }
-  
+
   private boolean isRuntimePath(URL url) throws IOException {
     if (!"file".equalsIgnoreCase(url.getProtocol())) {
       return false;
@@ -215,11 +217,11 @@ public final class Checker implements RelatedClassLookup, Constants {
       return false;
     }
   }
-  
+
   private boolean isRuntimeClass(URLConnection conn) throws IOException {
     final URL url = conn.getURL();
     if (isRuntimePath(url)) {
-       return true;
+      return true;
     } else if ("jar".equalsIgnoreCase(url.getProtocol()) && conn instanceof JarURLConnection) {
       final URL jarUrl = ((JarURLConnection) conn).getJarFileURL();
       return isRuntimePath(jarUrl);
@@ -229,10 +231,12 @@ public final class Checker implements RelatedClassLookup, Constants {
     }
     return false;
   }
-  
-  /** Reads a class (binary name) from the given {@link ClassLoader}. If not found there, falls back to the list of classes to be checked. */
+
+  /**
+   * Reads a class (binary name) from the given {@link ClassLoader}. If not found there, falls back to the list of classes to be checked.
+   */
   @Override
-  public ClassSignature getClassFromClassLoader(final String clazz) throws ClassNotFoundException,IOException {
+  public ClassSignature getClassFromClassLoader(final String clazz) throws ClassNotFoundException, IOException {
     if (classpathClassCache.containsKey(clazz)) {
       final ClassSignature c = classpathClassCache.get(clazz);
       if (c == null) {
@@ -288,7 +292,7 @@ public final class Checker implements RelatedClassLookup, Constants {
       throw new ClassNotFoundException(clazz);
     }
   }
-  
+
   @Override
   public ClassSignature lookupRelatedClass(String internalName) {
     final Type type = Type.getObjectType(internalName);
@@ -303,47 +307,48 @@ public final class Checker implements RelatedClassLookup, Constants {
         throw new WrapperRuntimeException(cnfe);
       } else {
         logger.warn(String.format(Locale.ENGLISH,
-          "The referenced class '%s' cannot be loaded. Please fix the classpath!",
-          type.getClassName()
-        ));
+            "The referenced class '%s' cannot be loaded. Please fix the classpath!",
+            type.getClassName()));
         return null;
       }
     } catch (IOException ioe) {
       throw new WrapperRuntimeException(ioe);
     }
   }
-  
+
   /** Reads a list of bundled API signatures from classpath. */
-  public void addBundledSignatures(String name, String jdkTargetVersion) throws IOException,ParseException {
+  public void addBundledSignatures(String name, String jdkTargetVersion) throws IOException, ParseException {
     forbiddenSignatures.addBundledSignatures(name, jdkTargetVersion);
   }
-  
+
   /** Reads a list of API signatures. Closes the Reader when done (on Exception, too)! */
-  public void parseSignaturesFile(InputStream in, String name) throws IOException,ParseException {
+  public void parseSignaturesFile(InputStream in, String name) throws IOException, ParseException {
     forbiddenSignatures.parseSignaturesStream(in, name);
   }
-  
+
   /** Reads a list of API signatures from the given URL. */
-  public void parseSignaturesFile(URL url) throws IOException,ParseException {
+  public void parseSignaturesFile(URL url) throws IOException, ParseException {
     parseSignaturesFile(url.openStream(), url.toString());
   }
-  
+
   /** Reads a list of API signatures from the given file. */
-  public void parseSignaturesFile(File f) throws IOException,ParseException {
+  public void parseSignaturesFile(File f) throws IOException, ParseException {
     parseSignaturesFile(new FileInputStream(f), f.toString());
   }
-    
+
   /** Reads a list of API signatures from a String. */
-  public void parseSignaturesString(String signatures) throws IOException,ParseException {
+  public void parseSignaturesString(String signatures) throws IOException, ParseException {
     forbiddenSignatures.parseSignaturesString(signatures);
   }
-  
+
   /** Returns if there are any signatures. */
   public boolean hasNoSignatures() {
     return forbiddenSignatures.hasNoSignatures();
   }
-  
-  /** Parses and adds a class from the given stream to the list of classes to check. Closes the stream when parsed (on Exception, too)! Does not log anything. */
+
+  /**
+   * Parses and adds a class from the given stream to the list of classes to check. Closes the stream when parsed (on Exception, too)! Does not log anything.
+   */
   public void addClassToCheck(final InputStream in, String name) throws IOException {
     final ClassReader reader;
     try {
@@ -358,7 +363,7 @@ public final class Checker implements RelatedClassLookup, Constants {
     final String binaryName = Type.getObjectType(reader.getClassName()).getClassName();
     classesToCheck.put(binaryName, new ClassSignature(reader, false, true));
   }
-  
+
   /** Parses and adds a class from the given file to the list of classes to check. Does not log anything. */
   public void addClassToCheck(File f) throws IOException {
     addClassToCheck(new FileInputStream(f), f.toString());
@@ -394,30 +399,40 @@ public final class Checker implements RelatedClassLookup, Constants {
   public void addSuppressAnnotation(Class<? extends Annotation> anno) {
     suppressAnnotations.add(anno.getName());
   }
-  
-  /** Adds suppressing annotation name in binary form (dotted). It may also be a glob pattern. The class name is not checked for existence. */
+
+  /**
+   * Adds suppressing annotation name in binary form (dotted). It may also be a glob pattern. The class name is not checked for existence.
+   */
   public void addSuppressAnnotation(String annoName) {
     suppressAnnotations.add(annoName);
   }
-  
+
   /** Parses a class and checks for valid method invocations */
   private int checkClass(final ClassReader reader, Pattern suppressAnnotationsPattern) {
     final String className = Type.getObjectType(reader.getClassName()).getClassName();
-    final ClassScanner scanner = new ClassScanner(this, forbiddenSignatures, suppressAnnotationsPattern); 
+    final ClassScanner scanner = new ClassScanner(this, forbiddenSignatures, suppressAnnotationsPattern);
     reader.accept(scanner, ClassReader.SKIP_FRAMES);
     final List<ForbiddenViolation> violations = scanner.getSortedViolations();
     final Pattern splitter = Pattern.compile(Pattern.quote(ForbiddenViolation.SEPARATOR));
+    if (!violations.isEmpty()) {
+      reportWriter.writeFile(className, scanner.getSourceFile());
+    }
     for (final ForbiddenViolation v : violations) {
       for (final String line : splitter.split(v.format(className, scanner.getSourceFile()))) {
         logger.error(line);
       }
+      reportWriter.writeLine(v);
+    }
+    if (!violations.isEmpty()) {
+      reportWriter.writeFileEnd();
     }
     return violations.size();
   }
-  
+
   public void run() throws ForbiddenApiException {
     logger.info("Scanning classes for violations...");
     int errors = 0;
+    reportWriter.start();
     final Pattern suppressAnnotationsPattern = AsmUtils.glob2Pattern(suppressAnnotations.toArray(new String[suppressAnnotations.size()]));
     try {
       for (final ClassSignature c : classesToCheck.values()) {
@@ -430,9 +445,11 @@ public final class Checker implements RelatedClassLookup, Constants {
       } else {
         throw new ForbiddenApiException("Check for forbidden API calls failed.");
       }
+    } finally {
+      reportWriter.end();
     }
-    
-    final String message = String.format(Locale.ENGLISH, 
+
+    final String message = String.format(Locale.ENGLISH,
         "Scanned %d class file(s) for forbidden API invocations (in %.2fs), %d error(s).",
         classesToCheck.size(), (System.currentTimeMillis() - start) / 1000.0, errors);
     if (options.contains(Option.FAIL_ON_VIOLATION) && errors > 0) {
@@ -442,5 +459,5 @@ public final class Checker implements RelatedClassLookup, Constants {
       logger.info(message);
     }
   }
-  
+
 }
